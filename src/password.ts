@@ -37,7 +37,7 @@ function forkChild(
     child.send(message);
 }
 
-async function forkChildAsync(message: ForkMessage): Promise<string> {
+function forkChildAsync(message: ForkMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {
         const child: ChildProcess = fork(path.join(__dirname, 'password'));
 
@@ -61,9 +61,7 @@ async function forkChildAsync(message: ForkMessage): Promise<string> {
 
 export async function hash(rounds: number, password: string): Promise<string> {
     const hashedPassword = crypto.createHash('sha512').update(password).digest('hex');
-    const message: HashMessage = { type: 'hash', rounds, password: hashedPassword };
-
-    return await forkChildAsync(message);
+    return await forkChildAsync({ type: 'hash', rounds, password: hashedPassword });
 }
 
 let fakeHashCache: string | undefined;
@@ -78,10 +76,15 @@ async function getFakeHash(): Promise<string> {
         fakeHashPromise = hash(12, Math.random().toString());
     }
 
-    const resolvedFakeHashPromise = await fakeHashPromise;
-    fakeHashCache = resolvedFakeHashPromise;
-    fakeHashPromise = null;
-    return fakeHashCache;
+    try {
+        const resolvedFakeHashPromise = await fakeHashPromise;
+        fakeHashCache = resolvedFakeHashPromise;
+        fakeHashPromise = null;
+        return fakeHashCache;
+    } catch (error) {
+        console.error(error);
+        throw error;
+    }
 }
 
 export async function compare(
@@ -89,24 +92,29 @@ export async function compare(
     hash: string,
     shaWrapped: boolean
 ): Promise<boolean> {
-    const fakeHash = await getFakeHash();
+    try {
+        const fakeHash = await getFakeHash();
 
-    if (shaWrapped) {
-        password = crypto.createHash('sha512').update(password).digest('hex');
-    }
+        if (shaWrapped) {
+            password = crypto.createHash('sha512').update(password).digest('hex');
+        }
 
-    const message: CompareMessage = { type: 'compare', password, hash: hash || fakeHash };
+        const message: CompareMessage = { type: 'compare', password, hash: hash || fakeHash };
 
-    return new Promise<boolean>((resolve, reject) => {
-        forkChild(message, (err, result) => {
-            if (err) {
-                console.error(err);
-                reject(err);
-            } else {
-                resolve(result as boolean);
-            }
+        return new Promise<boolean>((resolve, reject) => {
+            forkChild(message, (err, result) => {
+                if (err) {
+                    console.error(err);
+                    reject(err);
+                } else {
+                    resolve(result as boolean);
+                }
+            });
         });
-    });
+    } catch (error) {
+        console.error(error);
+        throw error;
+    }
 }
 
 async function hashPassword(msg: HashMessage): Promise<string> {

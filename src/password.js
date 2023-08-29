@@ -41,7 +41,7 @@ function forkChild(message, callback) {
     });
     child.send(message);
 }
-async function forkChildAsync(message) {
+function forkChildAsync(message) {
     return new Promise((resolve, reject) => {
         const child = (0, child_process_1.fork)(path.join(__dirname, 'password'));
         child.on('message', (msg) => {
@@ -62,8 +62,7 @@ async function forkChildAsync(message) {
 }
 async function hash(rounds, password) {
     const hashedPassword = crypto.createHash('sha512').update(password).digest('hex');
-    const message = { type: 'hash', rounds, password: hashedPassword };
-    return await forkChildAsync(message);
+    return await forkChildAsync({ type: 'hash', rounds, password: hashedPassword });
 }
 exports.hash = hash;
 let fakeHashCache;
@@ -75,30 +74,44 @@ async function getFakeHash() {
     if (fakeHashPromise === null) {
         fakeHashPromise = hash(12, Math.random().toString());
     }
-    const resolvedFakeHashPromise = await fakeHashPromise;
-    fakeHashCache = resolvedFakeHashPromise;
-    fakeHashPromise = null;
-    return fakeHashCache;
+    try {
+        const resolvedFakeHashPromise = await fakeHashPromise;
+        fakeHashCache = resolvedFakeHashPromise;
+        fakeHashPromise = null;
+        return fakeHashCache;
+    }
+    catch (error) {
+        console.error(error);
+        throw error; // Re-throw the error to be handled by caller
+    }
 }
 async function compare(password, hash, shaWrapped) {
-    const fakeHash = await getFakeHash();
-    if (shaWrapped) {
-        password = crypto.createHash('sha512').update(password).digest('hex');
-    }
-    const message = { type: 'compare', password, hash: hash || fakeHash };
-    return new Promise((resolve, reject) => {
-        forkChild(message, (err, result) => {
-            if (err) {
-                console.error(err);
-                reject(err);
-            }
-            else {
-                resolve(result);
-            }
+    try {
+        const fakeHash = await getFakeHash();
+        if (shaWrapped) {
+            password = crypto.createHash('sha512').update(password).digest('hex');
+        }
+        const message = { type: 'compare', password, hash: hash || fakeHash };
+        return new Promise((resolve, reject) => {
+            forkChild(message, (err, result) => {
+                if (err) {
+                    console.error(err);
+                    reject(err);
+                }
+                else {
+                    resolve(result);
+                }
+            });
         });
-    });
+    }
+    catch (error) {
+        console.error(error);
+        throw error; // Re-throw the error to be handled by caller
+    }
 }
 exports.compare = compare;
+// Rest of the code remains the same...
+// Process event listener...
 async function hashPassword(msg) {
     const salt = await bcrypt.genSalt(msg.rounds);
     const hash = await bcrypt.hash(msg.password, salt);
