@@ -37,7 +37,7 @@ function forkChild(
     child.send(message);
 }
 
-function forkChildAsync(message: ForkMessage): Promise<string> {
+async function forkChildAsync(message: ForkMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {
         const child: ChildProcess = fork(path.join(__dirname, 'password'));
 
@@ -61,7 +61,7 @@ function forkChildAsync(message: ForkMessage): Promise<string> {
 
 export async function hash(rounds: number, password: string): Promise<string> {
     const hashedPassword = crypto.createHash('sha512').update(password).digest('hex');
-    return await forkChildAsync({ type: 'hash', rounds, password: hashedPassword });
+    return await forkChildAsync({ type: 'hash', rounds: rounds, password: hashedPassword });
 }
 
 let fakeHashCache: string | undefined;
@@ -73,18 +73,18 @@ async function getFakeHash(): Promise<string> {
     }
 
     if (fakeHashPromise === null) {
-        fakeHashPromise = hash(12, Math.random().toString());
+        try {
+            fakeHashPromise = hash(12, Math.random().toString());
+            const resolvedFakeHashPromise = await fakeHashPromise;
+            fakeHashCache = resolvedFakeHashPromise;
+            fakeHashPromise = null;
+            return fakeHashCache;
+        } catch (error) {
+            console.error(error);
+            throw error;
+        }
     }
-
-    try {
-        const resolvedFakeHashPromise = await fakeHashPromise;
-        fakeHashCache = resolvedFakeHashPromise;
-        fakeHashPromise = null;
-        return fakeHashCache;
-    } catch (error) {
-        console.error(error);
-        throw error;
-    }
+    return fakeHashCache;
 }
 
 export async function compare(
@@ -118,7 +118,7 @@ export async function compare(
 }
 
 async function hashPassword(msg: HashMessage): Promise<string> {
-    const salt = await bcrypt.genSalt(msg.rounds);
+    const salt = await bcrypt.genSalt(parseInt(msg.rounds.toString(), 10));
     const hash = await bcrypt.hash(msg.password, salt);
     return hash;
 }
@@ -137,17 +137,24 @@ function sendError(error: Error) {
     process.send({ err: error.message });
 }
 
+async function tryMethod<T>(method: (msg: ForkMessage) => Promise<T>, msg: ForkMessage): Promise<T> {
+    try {
+        return await method(msg);
+    } catch (err) {
+        console.error(err);
+        throw err;
+    }
+}
+
 async function handleAsyncOperation(msg: ForkMessage) {
     try {
-        let result: string | boolean | undefined;
-
         if (msg.type === 'hash') {
-            result = await hashPassword(msg);
+            const result = await tryMethod(hashPassword, msg);
+            sendResult(result);
         } else if (msg.type === 'compare') {
-            result = await comparePasswords(msg);
+            const result = await tryMethod(comparePasswords, msg);
+            sendResult(result);
         }
-
-        sendResult(result);
     } catch (err) {
         console.error(err);
         sendError(err as Error);

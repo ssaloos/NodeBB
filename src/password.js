@@ -41,7 +41,7 @@ function forkChild(message, callback) {
     });
     child.send(message);
 }
-function forkChildAsync(message) {
+async function forkChildAsync(message) {
     return new Promise((resolve, reject) => {
         const child = (0, child_process_1.fork)(path.join(__dirname, 'password'));
         child.on('message', (msg) => {
@@ -62,7 +62,7 @@ function forkChildAsync(message) {
 }
 async function hash(rounds, password) {
     const hashedPassword = crypto.createHash('sha512').update(password).digest('hex');
-    return await forkChildAsync({ type: 'hash', rounds, password: hashedPassword });
+    return await forkChildAsync({ type: 'hash', rounds: rounds, password: hashedPassword });
 }
 exports.hash = hash;
 let fakeHashCache;
@@ -72,18 +72,19 @@ async function getFakeHash() {
         return fakeHashCache;
     }
     if (fakeHashPromise === null) {
-        fakeHashPromise = hash(12, Math.random().toString());
+        try {
+            fakeHashPromise = hash(12, Math.random().toString());
+            const resolvedFakeHashPromise = await fakeHashPromise;
+            fakeHashCache = resolvedFakeHashPromise;
+            fakeHashPromise = null;
+            return fakeHashCache;
+        }
+        catch (error) {
+            console.error(error);
+            throw error;
+        }
     }
-    try {
-        const resolvedFakeHashPromise = await fakeHashPromise;
-        fakeHashCache = resolvedFakeHashPromise;
-        fakeHashPromise = null;
-        return fakeHashCache;
-    }
-    catch (error) {
-        console.error(error);
-        throw error; // Re-throw the error to be handled by caller
-    }
+    return fakeHashCache;
 }
 async function compare(password, hash, shaWrapped) {
     try {
@@ -106,14 +107,12 @@ async function compare(password, hash, shaWrapped) {
     }
     catch (error) {
         console.error(error);
-        throw error; // Re-throw the error to be handled by caller
+        throw error;
     }
 }
 exports.compare = compare;
-// Rest of the code remains the same...
-// Process event listener...
 async function hashPassword(msg) {
-    const salt = await bcrypt.genSalt(msg.rounds);
+    const salt = await bcrypt.genSalt(parseInt(msg.rounds.toString(), 10));
     const hash = await bcrypt.hash(msg.password, salt);
     return hash;
 }
@@ -128,16 +127,25 @@ function sendResult(result) {
 function sendError(error) {
     process.send({ err: error.message });
 }
+async function tryMethod(method, msg) {
+    try {
+        return await method(msg);
+    }
+    catch (err) {
+        console.error(err);
+        throw err;
+    }
+}
 async function handleAsyncOperation(msg) {
     try {
-        let result;
         if (msg.type === 'hash') {
-            result = await hashPassword(msg);
+            const result = await tryMethod(hashPassword, msg);
+            sendResult(result);
         }
         else if (msg.type === 'compare') {
-            result = await comparePasswords(msg);
+            const result = await tryMethod(comparePasswords, msg);
+            sendResult(result);
         }
-        sendResult(result);
     }
     catch (err) {
         console.error(err);
