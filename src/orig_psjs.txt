@@ -24,7 +24,7 @@ function forkChild(
     const child: ChildProcess = fork(path.join(__dirname, 'password'));
 
     child.on('message', (msg: { err?: string; result: string | boolean }) => {
-        const { err, result } = msg; // Use object destructuring
+        const { err, result } = msg;
         const error = err ? new Error(err) : null;
         callback(error, result);
     });
@@ -37,24 +37,37 @@ function forkChild(
     child.send(message);
 }
 
-// Hashing and comparison functions...
+async function forkChildAsync(message: ForkMessage): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+        const child: ChildProcess = fork(path.join(__dirname, 'password'));
+
+        child.on('message', (msg: { err?: string; result: string }) => {
+            const { err, result } = msg;
+            if (err) {
+                reject(new Error(err));
+            } else {
+                resolve(result);
+            }
+        });
+
+        child.on('error', (err: Error) => {
+            console.error(err.stack);
+            reject(err);
+        });
+
+        child.send(message);
+    });
+}
+
 export async function hash(rounds: number, password: string): Promise<string> {
     const hashedPassword = crypto.createHash('sha512').update(password).digest('hex');
     const message: HashMessage = { type: 'hash', rounds, password: hashedPassword };
 
-    return new Promise<string>((resolve, reject) => {
-        forkChild(message, (err, result) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve(result as string);
-            }
-        });
-    });
+    return await forkChildAsync(message);
 }
 
 let fakeHashCache: string | undefined;
-let fakeHashPromise: Promise<string> | null = null; // Track the fake hash promise
+let fakeHashPromise: Promise<string> | null = null;
 
 async function getFakeHash(): Promise<string> {
     if (fakeHashCache) {
@@ -67,7 +80,7 @@ async function getFakeHash(): Promise<string> {
 
     const resolvedFakeHashPromise = await fakeHashPromise;
     fakeHashCache = resolvedFakeHashPromise;
-    fakeHashPromise = null; // Reset the fake hash promise
+    fakeHashPromise = null;
     return fakeHashCache;
 }
 
@@ -84,22 +97,16 @@ export async function compare(
 
     const message: CompareMessage = { type: 'compare', password, hash: hash || fakeHash };
 
-    try {
-        const result = await new Promise<boolean>((resolve, reject) => {
-            forkChild(message, (err, result) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(result as boolean);
-                }
-            });
+    return new Promise<boolean>((resolve, reject) => {
+        forkChild(message, (err, result) => {
+            if (err) {
+                console.error(err);
+                reject(err);
+            } else {
+                resolve(result as boolean);
+            }
         });
-
-        return result;
-    } catch (error) {
-        console.error(error);
-        throw error;
-    }
+    });
 }
 
 async function hashPassword(msg: HashMessage): Promise<string> {
@@ -149,4 +156,3 @@ process.on('message', (msg: ForkMessage) => {
     });
 });
 
-export {};
