@@ -1,82 +1,152 @@
-// password.js original:
-'use strict';
+import * as path from 'path';
+import * as crypto from 'crypto';
+import * as bcrypt from 'bcryptjs';
+import { fork, ChildProcess } from 'child_process';
 
-const path = require('path');
-const crypto = require('crypto');
-const util = require('util');
+interface HashMessage {
+    type: 'hash';
+    rounds: number;
+    password: string;
+}
 
-const bcrypt = require('bcryptjs');
+interface CompareMessage {
+    type: 'compare';
+    password: string;
+    hash: string;
+}
 
-const fork = require('./meta/debugFork');
+type ForkMessage = HashMessage | CompareMessage;
 
-function forkChild(message, callback) {
-    const child = fork(path.join(__dirname, 'password'));
+function forkChild(
+    message: ForkMessage,
+    callback: (err: Error | null, result?: string | boolean) => void
+) {
+    const child: ChildProcess = fork(path.join(__dirname, 'password'));
 
-    child.on('message', (msg) => {
-        callback(msg.err ? new Error(msg.err) : null, msg.result);
+    child.on('message', (msg: { err?: string; result: string | boolean }) => {
+        const { err, result } = msg; // Use object destructuring
+        const error = err ? new Error(err) : null;
+        callback(error, result);
     });
-    child.on('error', (err) => {
+
+    child.on('error', (err: Error) => {
         console.error(err.stack);
-        callback(err);
+        callback(err, undefined);
     });
 
     child.send(message);
 }
 
-const forkChildAsync = util.promisify(forkChild);
+// Hashing and comparison functions...
+export async function hash(rounds: number, password: string): Promise<string> {
+    const hashedPassword = crypto.createHash('sha512').update(password).digest('hex');
+    const message: HashMessage = { type: 'hash', rounds, password: hashedPassword };
 
-exports.hash = async function (rounds, password) {
-    password = crypto.createHash('sha512').update(password).digest('hex');
-    return await forkChildAsync({ type: 'hash', rounds: rounds, password: password });
-};
+    return new Promise<string>((resolve, reject) => {
+        forkChild(message, (err, result) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(result as string);
+            }
+        });
+    });
+}
 
-exports.compare = async function (password, hash, shaWrapped) {
+let fakeHashCache: string | undefined;
+let fakeHashPromise: Promise<string> | null = null; // Track the fake hash promise
+
+async function getFakeHash(): Promise<string> {
+    if (fakeHashCache) {
+        return fakeHashCache;
+    }
+
+    if (fakeHashPromise === null) {
+        fakeHashPromise = hash(12, Math.random().toString());
+    }
+
+    const resolvedFakeHashPromise = await fakeHashPromise;
+    fakeHashCache = resolvedFakeHashPromise;
+    fakeHashPromise = null; // Reset the fake hash promise
+    return fakeHashCache;
+}
+
+export async function compare(
+    password: string,
+    hash: string,
+    shaWrapped: boolean
+): Promise<boolean> {
     const fakeHash = await getFakeHash();
 
     if (shaWrapped) {
         password = crypto.createHash('sha512').update(password).digest('hex');
     }
 
-    return await forkChildAsync({ type: 'compare', password: password, hash: hash || fakeHash });
-};
+    const message: CompareMessage = { type: 'compare', password, hash: hash || fakeHash };
 
-let fakeHashCache;
-async function getFakeHash() {
-    if (fakeHashCache) {
-        return fakeHashCache;
-    }
-    fakeHashCache = await exports.hash(12, Math.random().toString());
-    return fakeHashCache;
-}
-
-// child process
-process.on('message', (msg) => {
-    if (msg.type === 'hash') {
-        tryMethod(hashPassword, msg);
-    } else if (msg.type === 'compare') {
-        tryMethod(compare, msg);
-    }
-});
-
-async function tryMethod(method, msg) {
     try {
-        const result = await method(msg);
-        process.send({ result: result });
-    } catch (err) {
-        process.send({ err: err.message });
-    } finally {
-        process.disconnect();
+        const result = await new Promise<boolean>((resolve, reject) => {
+            forkChild(message, (err, result) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(result as boolean);
+                }
+            });
+        });
+
+        return result;
+    } catch (error) {
+        console.error(error);
+        throw error;
     }
 }
 
-async function hashPassword(msg) {
-    const salt = await bcrypt.genSalt(parseInt(msg.rounds, 10));
+async function hashPassword(msg: HashMessage): Promise<string> {
+    const salt = await bcrypt.genSalt(msg.rounds);
     const hash = await bcrypt.hash(msg.password, salt);
     return hash;
 }
 
-async function compare(msg) {
-    return await bcrypt.compare(String(msg.password || ''), String(msg.hash || ''));
+async function comparePasswords(msg: CompareMessage): Promise<boolean> {
+    return await bcrypt.compare(msg.password || '', msg.hash || '');
 }
 
-require('./promisify')(exports);
+function sendResult(result: string | boolean | undefined) {
+    if (result !== undefined) {
+        process.send({ result });
+    }
+}
+
+function sendError(error: Error) {
+    process.send({ err: error.message });
+}
+
+async function handleAsyncOperation(msg: ForkMessage) {
+    try {
+        let result: string | boolean | undefined;
+
+        if (msg.type === 'hash') {
+            result = await hashPassword(msg);
+        } else if (msg.type === 'compare') {
+            result = await comparePasswords(msg);
+        }
+
+        sendResult(result);
+    } catch (err) {
+        console.error(err);
+        sendError(err as Error);
+    } finally {
+        setImmediate(() => {
+            process.disconnect();
+        });
+    }
+}
+
+process.on('message', (msg: ForkMessage) => {
+    handleAsyncOperation(msg).catch((err) => {
+        console.error(err);
+    });
+});
+
+export {};
